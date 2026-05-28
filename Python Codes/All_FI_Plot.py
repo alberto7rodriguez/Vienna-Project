@@ -5,7 +5,7 @@ from scipy.linalg import matmul_toeplitz
 from tqdm import tqdm
 
 # ==========================================
-# 1. HELPER FUNCTIONS & INVERSE LAPLACE
+# 1. HELPER FUNCTIONS & LAPLACE / NOISE
 # ==========================================
 def coth(z):
     return np.cosh(z) / np.sinh(z)
@@ -18,29 +18,21 @@ def inverse_laplace_rational(B, A, enforce_real=True):
     B = np.atleast_1d(np.array(B, dtype=np.complex128))
     A = np.atleast_1d(np.array(A, dtype=np.complex128))
     r, p, k = residue(B, A)
-
-    info = {"residues": r, "poles": p, "direct_poly": k}
-    return info
+    return {"residues": r, "poles": p, "direct_poly": k}
 
 def derivatives_from_residues(t, residues, poles, enforce_real=True):
     t = np.asarray(t, dtype=float)
     G     = np.zeros_like(t, dtype=np.complex128)
     Gdot  = np.zeros_like(t, dtype=np.complex128)
-    
     for r, p in zip(residues, poles):
         ep = np.exp(p * t)
         G    += r * ep
         Gdot += r * p * ep
-        
     if enforce_real:
         G    = np.real_if_close(G)
         Gdot = np.real_if_close(Gdot)
-        
     return G, Gdot
 
-# ==========================================
-# 2. NOISE KERNEL & TEMPERATURE DERIVATIVE
-# ==========================================
 def noise_kernel_residue(t, gamma, alpha1, alpha2, Temp, Nmats=20000, delta_eps=1e-10):
     scalar_input = np.isscalar(t)
     t = np.atleast_1d(np.asarray(t, dtype=np.float64))
@@ -123,14 +115,12 @@ def dnu_dT_residue(t, gamma, alpha1, alpha2, Temp, Nmats=20000, delta_eps=1e-10)
     return float(out[0]) if scalar_input else out
 
 # ==========================================
-# 3. DYNAMICAL EVOLUTION & FISHER INFORMATION
+# 2. DYNAMICAL EVOLUTION (ALL FI SCHEMES)
 # ==========================================
-def evolve_FI_dynamics(t_array, sigma0, sigma_M, alpha1, alpha2, Temp, gamma, G, Gdot, mass=1.0):
+def evolve_all_FI_dynamics(t_array, sigma0, alpha1, alpha2, Temp, Omega_S, gamma, G, Gdot, mass=1.0):
     dt = t_array[1] - t_array[0]
     N = len(t_array)
-    
-    G_r = G.real
-    Gdot_r = Gdot.real
+    G_r, Gdot_r = G.real, Gdot.real
     
     # System contribution to Covariance (Constant T-derivative = 0)
     sx0, sp0, sxp0 = sigma0[0, 0], sigma0[1, 1], sigma0[0, 1]
@@ -143,26 +133,37 @@ def evolve_FI_dynamics(t_array, sigma0, sigma_M, alpha1, alpha2, Temp, gamma, G,
     nu_grid = np.array([noise_kernel_residue(t, gamma, alpha1, alpha2, Temp) for t in t_array]) / mass
     dnu_grid = dnu_dT_residue(t_array, gamma, alpha1, alpha2, Temp) / mass 
 
-    fisher_info_t = np.zeros(N)
-    var_x_total = np.zeros(N)
-    var_p_total = np.zeros(N)
-    QFI = np.zeros(N)
+    # Arrays to store tracking variables
+    FI_het, FI_hom_x, FI_hom_p, QFI = np.zeros(N), np.zeros(N), np.zeros(N), np.zeros(N)
+    
+    # Define Measurement Matrices
+    sig_M_het = np.array([[0.5, 0.0], [0.0, 0.5]])
+    sig_M_hom_x = np.array([[0.0, 0.0], [0.0, 1e8]]) # Infinite noise on p
+    sig_M_hom_p = np.array([[1e8, 0.0], [0.0, 0.0]]) # Infinite noise on x
 
-    #QFI
+    # Thermal values for the FI
+    FI_th_het = 0.5 * ((1/(Temp+sig_M_het[0,0]*Omega_S)**2)+(1/(Temp+sig_M_het[1,1])**2))
+    FI_th_hom_x = 0.5 * ((1/(Temp + sig_M_hom_x[0,0]*Omega_S)**2)+(1/(Temp + sig_M_hom_x[1,1])**2))
+    FI_th_hom_p = 0.5 * ((1/(Temp + sig_M_hom_p[0,0]*Omega_S)**2)+(1/(Temp + sig_M_hom_p[1,1])**2))
+
+    # Symplectic Matrix for QFI
     Omega_symp = np.array([[0, 1], [-1, 0]])
     kron_omega = np.kron(Omega_symp, Omega_symp)
     
-    for i in tqdm(range(1, N), desc="Simulating Dynamics & FI"):
+    def calc_classical_CFI(sig, dsig, sig_M):
+        inv_term = np.linalg.inv(sig + sig_M)
+        prod = np.dot(inv_term, dsig)
+        return 0.5 * np.trace(np.dot(prod, prod))
+
+    for i in tqdm(range(1, N), desc="Simulating Dynamics & FIs"):
         G_slice = G_r[:i+1][::-1] 
         Gd_slice = Gdot_r[:i+1][::-1] 
-        
         nu_seg = nu_grid[:i+1]  
         dnu_seg = dnu_grid[:i+1]
         
-        # Standard Covariance Integrals (Toeplitz)
+        # Integrals (Toeplitz)
         yG = matmul_toeplitz((nu_seg, nu_seg), G_slice)
         yGd = matmul_toeplitz((nu_seg, nu_seg), Gd_slice)
-        
         var_x_bath = np.dot(G_slice, yG) * dt**2
         var_p_bath = np.dot(Gd_slice, yGd) * dt**2
         cov_xp_bath = np.dot(G_slice, yGd) * dt**2
@@ -172,13 +173,8 @@ def evolve_FI_dynamics(t_array, sigma0, sigma_M, alpha1, alpha2, Temp, gamma, G,
             [cov_xp_sys[i] + cov_xp_bath, var_p_sys[i] + var_p_bath]
         ])
         
-        var_x_total[i] = sigma_t[0, 0]
-        var_p_total[i] = sigma_t[1, 1]
-        
-        # Derivative Covariance Integrals (Toeplitz)
         dyG = matmul_toeplitz((dnu_seg, dnu_seg), G_slice)
         dyGd = matmul_toeplitz((dnu_seg, dnu_seg), Gd_slice)
-        
         dvar_x_bath = np.dot(G_slice, dyG) * dt**2
         dvar_p_bath = np.dot(Gd_slice, dyGd) * dt**2
         dcov_xp_bath = np.dot(G_slice, dyGd) * dt**2
@@ -188,86 +184,72 @@ def evolve_FI_dynamics(t_array, sigma0, sigma_M, alpha1, alpha2, Temp, gamma, G,
             [dcov_xp_bath, dvar_p_bath]
         ])
         
-        # Calculate Fisher Information Term
-        inverse_term = np.linalg.inv(sigma_t + sigma_M)
-        matrix_prod = np.dot(inverse_term, dsigma_t)
-        fisher_info_t[i] = 0.5 * np.trace(np.dot(matrix_prod, matrix_prod))
-
+        # 1. Classical FIs
+        FI_het[i] = calc_classical_CFI(sigma_t, dsigma_t, sig_M_het)
+        FI_hom_x[i] = calc_classical_CFI(sigma_t, dsigma_t, sig_M_hom_x)
+        FI_hom_p[i] = calc_classical_CFI(sigma_t, dsigma_t, sig_M_hom_p)
+        
+        # 2. Quantum FI (Exact Bures metric formula)
         kron_sigma = np.kron(sigma_t, sigma_t)
         M_inv = np.linalg.inv(kron_sigma - kron_omega)
         dsigma_vec = dsigma_t.flatten(order='F') 
         QFI[i] = 0.5 * np.dot(dsigma_vec.T, np.dot(M_inv, dsigma_vec))
-            
-    return {"time": t_array, "var_x": var_x_total, "var_p": var_p_total, "FI": fisher_info_t, "QFI": QFI}
+        
+    return {"time": t_array, "FI_het": FI_het, "FI_hom_x": FI_hom_x, "FI_hom_p": FI_hom_p, "QFI": QFI, "FI_th_het": FI_th_het, "FI_th_hom_x": FI_th_hom_x, "FI_th_hom_p": FI_th_hom_p,}
 
 
 # ==========================================
 # 4. EXECUTION BLOCK
 # ==========================================
 if __name__ == "__main__":
-    # --- Physical Parameters (Replace with your actual values) ---
+    # --- Physical Parameters ---
     gamma = 1.0
     alpha1 = 0.1
     alpha2 = 2.0
     Omega_S_bare = 1.0
     delta_Omega_s = np.sqrt(alpha1)
     Omega_S = np.sqrt(Omega_S_bare**2 + delta_Omega_s**2)
-    temp = 20.0
+    temp = 1.0
     mass = 1.0
     
     # Simulation Time Grid
-    times = np.linspace(0, 60, 500)
+    times = np.linspace(0, 75, 800)
     
-    # Laplace Polynomials for the Green's Function
+    # Laplace Polynomials for Green's Function
     B = [1, gamma, alpha2 * gamma]
     A = [1, gamma, alpha2 * gamma + Omega_S**2, gamma * Omega_S**2, alpha2 * gamma * Omega_S**2 - gamma * alpha1 * alpha2]
     
-    # Extract Green's Function and Derivative
+    # Extract Green's Function
     info = inverse_laplace_rational(B, A)
     G, Gdot = derivatives_from_residues(times, info["residues"], info["poles"])
     
-    sigma0 = np.array([[2.0 / Omega_S_bare, 0], 
-                       [0, Omega_S_bare / 2.0]])
-    
-    # ---------------------------------------------------------
-    # DEFINE YOUR MEASUREMENT NOISE MATRIX HERE
-    # Example 1: Homodyne (x-quadrature measurement) 
-    #sigma_M = np.array([[1e6, 0.0], [0.0, 0.0]])  # Large noise on p
-    # Example 2: Heterodyne (symmetric measurement)
-    sigma_M = np.array([[0.5, 0.0], [0.0, 0.5]])
-    # ---------------------------------------------------------
+    # Initial State Covariance Matrix (assuming ground/bare state)
+    Omega_S_bare = np.sqrt(Omega_S**2)
+    sigma0 = np.array([[2.0 / Omega_S_bare, 0], [0, Omega_S_bare / 2.0]])
 
-    # Run Simulation
-    sol = evolve_FI_dynamics(times, sigma0, sigma_M, alpha1, alpha2, temp, gamma, G, Gdot, mass)
-
-   # ==========================================
-    # 5. PLOT RESULTS WITH ASYMPTOTES
-    # ==========================================
-    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(8, 8), sharex=True)
+    #Thermal QFI for a single HO
+    QFI_th_HO = 0.25*(Omega_S**2 / temp**4)*csch2(Omega_S / (2*temp))
     
-    # Calculate asymptotic thermal values (High-T limit, Omega_S = 1)
-    thermal_variance = temp  
-    thermal_FI = 1.0 / (temp + 0.5)**2  # Valid for Heterodyne detection
+    # --- 1. Run Dynamic Simulation ---
+    sol = evolve_all_FI_dynamics(times, sigma0, alpha1, alpha2, temp, Omega_S, gamma, G, Gdot, mass)
+    # --- 3. Plot Results ---
+    plt.figure(figsize=(10, 6))
     
-    # Variance Plot (ax1)
-    ax1.plot(sol["time"], sol["var_x"], label=r"$\langle x^2 \rangle(t)$")
-    ax1.plot(sol["time"], sol["var_p"], label=r"$\langle p^2 \rangle(t)$")
-    ax1.axhline(thermal_variance, color='black', linestyle='--', alpha=0.7, label=rf"Thermal Asymptote ($T={temp}$)")
+    # Dynamical Curves
+    #plt.plot(sol["time"][1:], sol["QFI"][1:], color='black', linewidth=2.5, label=r"Quantum FI ($\mathcal{F}^Q$)")
+    plt.plot(sol["time"][1:], sol["FI_hom_x"][1:], color='red', linewidth=1.5, label=r"Homodyne-$x$ FI")
+    plt.plot(sol["time"][1:], sol["FI_hom_p"][1:], color='green', linewidth=1.5, label=r"Homodyne-$p$ FI")
+    plt.plot(sol["time"][1:], sol["FI_het"][1:], color='blue', linewidth=1.5, label=r"Heterodyne FI")
+    if temp > 19:
+        plt.axhline(sol["FI_th_hom_x"], linestyle='--', alpha=0.2, color='black', linewidth=1.5)
+        plt.axhline(sol["FI_th_hom_p"], linestyle='--', alpha=0.2, color='black', linewidth=1.5)
+        plt.axhline(sol["FI_th_het"], linestyle='--', alpha=0.2, color='black', linewidth=1.5)
+    #plt.axhline(QFI_th_HO, color='black', linestyle='--', alpha=0.7, label=r"Thermal Asymptote $\mathcal{F}_{th}$")
     
-    ax1.set_ylabel("Variance")
-    ax1.legend()
-    ax1.grid(True)
-    ax1.set_title(rf"Homodyne detection $T={temp}$")
-    
-    # Fisher Information Plot (ax2)
-    ax2.plot(sol["time"], sol["FI"], color='red', label=r"Dynamical $\mathcal{F}_\sigma^G(t)$")
-    #ax2.plot(sol["time"], sol["QFI"], color='black', label=r"$QFI$")
-    ax2.axhline(thermal_FI, color='black', linestyle='--', alpha=0.7, label=r"Thermal Asymptote $\mathcal{F}_{th}$")
-    
-    ax2.set_xlabel("t")
-    ax2.set_ylabel(r"$\mathcal{F}_T$")
-    ax2.legend()
-    ax2.grid(True)
-    
+    plt.xlabel("Time (t)")
+    plt.ylabel("FI")
+    plt.title(rf"Dynamical Fisher Information (T={temp})")
+    plt.legend(loc='best')
+    plt.grid(True)
     plt.tight_layout()
     plt.show()

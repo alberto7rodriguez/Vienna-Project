@@ -193,8 +193,21 @@ def evolve_FI_dynamics(t_array, sigma0, sigma_M, alpha1, alpha2, Temp, gamma, G,
         matrix_prod = np.dot(inverse_term, dsigma_t)
         fisher_info_t[i] = 0.5 * np.trace(np.dot(matrix_prod, matrix_prod))
 
+        # Calculate QFI with a Truncated Spectral Inverse
         kron_sigma = np.kron(sigma_t, sigma_t)
-        M_inv = np.linalg.inv(kron_sigma - kron_omega)
+        M = kron_sigma - kron_omega
+        
+        # 1. Get exact eigenvalues and eigenvectors (M is symmetric)
+        evals, evecs = np.linalg.eigh(M)
+        
+        # 2. Filter out unphysical negative values and dangerously small positive ones.
+        # Any eigenvalue < 1e-7 is numerical noise crossing the pure state boundary.
+        threshold = 1e-7
+        evals_inv = np.where(evals > threshold, 1.0 / evals, 0.0)
+        
+        # 3. Reconstruct the perfectly stable inverse matrix
+        M_inv = evecs @ np.diag(evals_inv) @ evecs.T
+        
         dsigma_vec = dsigma_t.flatten(order='F') 
         QFI[i] = 0.5 * np.dot(dsigma_vec.T, np.dot(M_inv, dsigma_vec))
             
@@ -212,11 +225,11 @@ if __name__ == "__main__":
     Omega_S_bare = 1.0
     delta_Omega_s = np.sqrt(alpha1)
     Omega_S = np.sqrt(Omega_S_bare**2 + delta_Omega_s**2)
-    temp = 20.0
+    temp = 1
     mass = 1.0
     
     # Simulation Time Grid
-    times = np.linspace(0, 60, 500)
+    times = np.linspace(0, 100, 500)
     
     # Laplace Polynomials for the Green's Function
     B = [1, gamma, alpha2 * gamma]
@@ -232,9 +245,9 @@ if __name__ == "__main__":
     # ---------------------------------------------------------
     # DEFINE YOUR MEASUREMENT NOISE MATRIX HERE
     # Example 1: Homodyne (x-quadrature measurement) 
-    #sigma_M = np.array([[1e6, 0.0], [0.0, 0.0]])  # Large noise on p
+    sigma_M = np.array([[1e6, 0.0], [0.0, 0.0]])  # Large noise on p
     # Example 2: Heterodyne (symmetric measurement)
-    sigma_M = np.array([[0.5, 0.0], [0.0, 0.5]])
+    #sigma_M = np.array([[0.5, 0.0], [0.0, 0.5]])
     # ---------------------------------------------------------
 
     # Run Simulation
@@ -242,32 +255,16 @@ if __name__ == "__main__":
 
    # ==========================================
     # 5. PLOT RESULTS WITH ASYMPTOTES
-    # ==========================================
-    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(8, 8), sharex=True)
+    thermal_QFI = 0.25 * (Omega_S**2/temp**4) * csch2(Omega_S/(2*temp)) # Valid for HO
     
-    # Calculate asymptotic thermal values (High-T limit, Omega_S = 1)
-    thermal_variance = temp  
-    thermal_FI = 1.0 / (temp + 0.5)**2  # Valid for Heterodyne detection
     
-    # Variance Plot (ax1)
-    ax1.plot(sol["time"], sol["var_x"], label=r"$\langle x^2 \rangle(t)$")
-    ax1.plot(sol["time"], sol["var_p"], label=r"$\langle p^2 \rangle(t)$")
-    ax1.axhline(thermal_variance, color='black', linestyle='--', alpha=0.7, label=rf"Thermal Asymptote ($T={temp}$)")
-    
-    ax1.set_ylabel("Variance")
-    ax1.legend()
-    ax1.grid(True)
-    ax1.set_title(rf"Homodyne detection $T={temp}$")
-    
-    # Fisher Information Plot (ax2)
-    ax2.plot(sol["time"], sol["FI"], color='red', label=r"Dynamical $\mathcal{F}_\sigma^G(t)$")
-    #ax2.plot(sol["time"], sol["QFI"], color='black', label=r"$QFI$")
-    ax2.axhline(thermal_FI, color='black', linestyle='--', alpha=0.7, label=r"Thermal Asymptote $\mathcal{F}_{th}$")
-    
-    ax2.set_xlabel("t")
-    ax2.set_ylabel(r"$\mathcal{F}_T$")
-    ax2.legend()
-    ax2.grid(True)
+    plt.figure(figsize=(10, 6))
+    plt.plot(sol["time"], sol["QFI"], color='black', label=r"$QFI$")
+    #plt.axhline(thermal_QFI, color='black', linestyle='--', alpha=0.7, label=r"Thermal Asymptote $\mathcal{F}_{th}$")
+    plt.xlabel("t")
+    plt.ylabel(r"$\mathcal{F}_T$")
+    plt.legend()
+    plt.grid(True)
     
     plt.tight_layout()
     plt.show()

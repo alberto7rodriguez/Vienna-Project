@@ -18,7 +18,6 @@ def inverse_laplace_rational(B, A, enforce_real=True):
     B = np.atleast_1d(np.array(B, dtype=np.complex128))
     A = np.atleast_1d(np.array(A, dtype=np.complex128))
     r, p, k = residue(B, A)
-
     info = {"residues": r, "poles": p, "direct_poly": k}
     return info
 
@@ -108,11 +107,7 @@ def dnu_dT_residue(t, gamma, alpha1, alpha2, Temp, Nmats=20000, delta_eps=1e-10)
     term_A = - (2.0 * gamma**2 * alpha1 * alpha2) * term_A_sum.sum(axis=0)
     
     num_part1 = expo * (1 - t[None, :] * fk[:, None]) * denom[:, None]
-
-    # Calculate the purely k-dependent polynomial in 1D first
     inner_k_term = 4 * fk * (alpha2 * gamma + fk**2) - 2 * gamma**2 * fk
-
-    # Then broadcast it against the time-dependent expo matrix
     num_part2 = fk[:, None] * expo * inner_k_term[:, None]
     term_B_sum = k[:, None] * ((num_part1 - num_part2) / (denom[:, None]**2))
     term_B = - (4.0 * np.pi * gamma**2 * alpha1 * alpha2 / beta) * term_B_sum.sum(axis=0)
@@ -125,21 +120,20 @@ def dnu_dT_residue(t, gamma, alpha1, alpha2, Temp, Nmats=20000, delta_eps=1e-10)
 # ==========================================
 # 3. DYNAMICAL EVOLUTION & FISHER INFORMATION
 # ==========================================
-def evolve_FI_dynamics(t_array, sigma0, sigma_M, alpha1, alpha2, Temp, gamma, G, Gdot, mass=1.0):
+def evolve_FI_dynamics(t_array, sigma0, sigma_M, alpha1, alpha2, Temp, gamma, G, Gdot, Omega_S, mass=1.0):
     dt = t_array[1] - t_array[0]
     N = len(t_array)
     
     G_r = G.real
     Gdot_r = Gdot.real
     
-    # System contribution to Covariance (Constant T-derivative = 0)
+    # System contribution to Covariance
     sx0, sp0, sxp0 = sigma0[0, 0], sigma0[1, 1], sigma0[0, 1]
     var_x_sys = (Gdot_r**2) * sx0 + (G_r / mass)**2 * sp0 + 2 * Gdot_r * (G_r / mass) * sxp0
     a, b = mass * Gdot_r, Gdot_r 
     var_p_sys = (a**2) * sx0 + (b**2) * sp0 + 2 * a * b * sxp0
     cov_xp_sys = Gdot_r * a * sx0 + (G_r/mass) * b * sp0 + (Gdot_r * b + (G_r/mass)*a)*sxp0
 
-    # Precompute noise kernel and its Temperature derivative
     nu_grid = np.array([noise_kernel_residue(t, gamma, alpha1, alpha2, Temp) for t in t_array]) / mass
     dnu_grid = dnu_dT_residue(t_array, gamma, alpha1, alpha2, Temp) / mass 
 
@@ -148,121 +142,123 @@ def evolve_FI_dynamics(t_array, sigma0, sigma_M, alpha1, alpha2, Temp, gamma, G,
     var_p_total = np.zeros(N)
     QFI = np.zeros(N)
 
-    #QFI
     Omega_symp = np.array([[0, 1], [-1, 0]])
     kron_omega = np.kron(Omega_symp, Omega_symp)
     
+    # CORRECTED: Backward Rotation Matrix U(-t) for Interaction Picture
+    def get_R_back(t, m, w):
+        return np.array([
+            [np.cos(w*t), -(1.0/(m*w)) * np.sin(w*t)],
+            [m*w * np.sin(w*t),  np.cos(w*t)]
+        ])
+
     for i in tqdm(range(1, N), desc="Simulating Dynamics & FI"):
+        t_current = t_array[i]
+        
         G_slice = G_r[:i+1][::-1] 
         Gd_slice = Gdot_r[:i+1][::-1] 
-        
         nu_seg = nu_grid[:i+1]  
         dnu_seg = dnu_grid[:i+1]
         
-        # Standard Covariance Integrals (Toeplitz)
         yG = matmul_toeplitz((nu_seg, nu_seg), G_slice)
         yGd = matmul_toeplitz((nu_seg, nu_seg), Gd_slice)
-        
         var_x_bath = np.dot(G_slice, yG) * dt**2
         var_p_bath = np.dot(Gd_slice, yGd) * dt**2
         cov_xp_bath = np.dot(G_slice, yGd) * dt**2
         
-        sigma_t = np.array([
+        sigma_lab = np.array([
             [var_x_sys[i] + var_x_bath, cov_xp_sys[i] + cov_xp_bath],
             [cov_xp_sys[i] + cov_xp_bath, var_p_sys[i] + var_p_bath]
         ])
         
-        var_x_total[i] = sigma_t[0, 0]
-        var_p_total[i] = sigma_t[1, 1]
-        
-        # Derivative Covariance Integrals (Toeplitz)
         dyG = matmul_toeplitz((dnu_seg, dnu_seg), G_slice)
         dyGd = matmul_toeplitz((dnu_seg, dnu_seg), Gd_slice)
-        
         dvar_x_bath = np.dot(G_slice, dyG) * dt**2
         dvar_p_bath = np.dot(Gd_slice, dyGd) * dt**2
         dcov_xp_bath = np.dot(G_slice, dyGd) * dt**2
         
-        dsigma_t = np.array([
+        dsigma_lab = np.array([
             [dvar_x_bath, dcov_xp_bath],
             [dcov_xp_bath, dvar_p_bath]
         ])
         
-        # Calculate Fisher Information Term
-        inverse_term = np.linalg.inv(sigma_t + sigma_M)
-        matrix_prod = np.dot(inverse_term, dsigma_t)
+        # --- SHIFT TO INTERACTION PICTURE ---
+        R_t = get_R_back(t_current, mass, Omega_S) # Using correct renormalized Omega
+        
+        sigma_rot = np.dot(np.linalg.inv(R_t), np.dot(sigma_lab, np.linalg.inv(R_t).T))
+        dsigma_rot = np.dot(np.linalg.inv(R_t), np.dot(dsigma_lab, np.linalg.inv(R_t).T))
+        
+        # Rotate the measurement matrix so the lab-frame physics is strictly preserved
+        sigma_M_rot = np.dot(R_t, np.dot(sigma_M, R_t.T))
+        
+        var_x_total[i] = sigma_rot[0, 0]
+        var_p_total[i] = sigma_rot[1, 1]
+        
+        # Classical FI
+        inverse_term = np.linalg.inv(sigma_rot + sigma_M_rot)
+        matrix_prod = np.dot(inverse_term, dsigma_rot)
         fisher_info_t[i] = 0.5 * np.trace(np.dot(matrix_prod, matrix_prod))
 
-        kron_sigma = np.kron(sigma_t, sigma_t)
+        # Quantum FI (With 1e-10 Regularization for pure-state singularity)
+        reg_sigma = sigma_rot + 1e-10 * np.eye(2)
+        kron_sigma = np.kron(reg_sigma, reg_sigma)
         M_inv = np.linalg.inv(kron_sigma - kron_omega)
-        dsigma_vec = dsigma_t.flatten(order='F') 
+        dsigma_vec = dsigma_rot.flatten(order='F') 
         QFI[i] = 0.5 * np.dot(dsigma_vec.T, np.dot(M_inv, dsigma_vec))
             
     return {"time": t_array, "var_x": var_x_total, "var_p": var_p_total, "FI": fisher_info_t, "QFI": QFI}
-
 
 # ==========================================
 # 4. EXECUTION BLOCK
 # ==========================================
 if __name__ == "__main__":
-    # --- Physical Parameters (Replace with your actual values) ---
     gamma = 1.0
     alpha1 = 0.1
     alpha2 = 2.0
     Omega_S_bare = 1.0
     delta_Omega_s = np.sqrt(alpha1)
     Omega_S = np.sqrt(Omega_S_bare**2 + delta_Omega_s**2)
-    temp = 20.0
+    temp = 1.0
     mass = 1.0
     
-    # Simulation Time Grid
     times = np.linspace(0, 60, 500)
     
-    # Laplace Polynomials for the Green's Function
     B = [1, gamma, alpha2 * gamma]
     A = [1, gamma, alpha2 * gamma + Omega_S**2, gamma * Omega_S**2, alpha2 * gamma * Omega_S**2 - gamma * alpha1 * alpha2]
-    
-    # Extract Green's Function and Derivative
     info = inverse_laplace_rational(B, A)
     G, Gdot = derivatives_from_residues(times, info["residues"], info["poles"])
-    
+
+    poles = info["poles"]
+    osc_poles = [p for p in poles if np.imag(p) != 0]
+    pole_phys = osc_poles[np.argmax(np.real(osc_poles))]
+    Omega_eff = np.abs(np.imag(pole_phys))
+
+
     sigma0 = np.array([[2.0 / Omega_S_bare, 0], 
                        [0, Omega_S_bare / 2.0]])
     
-    # ---------------------------------------------------------
-    # DEFINE YOUR MEASUREMENT NOISE MATRIX HERE
-    # Example 1: Homodyne (x-quadrature measurement) 
-    #sigma_M = np.array([[1e6, 0.0], [0.0, 0.0]])  # Large noise on p
-    # Example 2: Heterodyne (symmetric measurement)
     sigma_M = np.array([[0.5, 0.0], [0.0, 0.5]])
-    # ---------------------------------------------------------
 
-    # Run Simulation
-    sol = evolve_FI_dynamics(times, sigma0, sigma_M, alpha1, alpha2, temp, gamma, G, Gdot, mass)
+    # CRITICAL: Pass the fully renormalized Omega_S here
+    sol = evolve_FI_dynamics(times, sigma0, sigma_M, alpha1, alpha2, temp, gamma, G, Gdot, Omega_eff, mass)
 
    # ==========================================
     # 5. PLOT RESULTS WITH ASYMPTOTES
     # ==========================================
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(8, 8), sharex=True)
     
-    # Calculate asymptotic thermal values (High-T limit, Omega_S = 1)
-    thermal_variance = temp  
-    thermal_FI = 1.0 / (temp + 0.5)**2  # Valid for Heterodyne detection
-    
-    # Variance Plot (ax1)
-    ax1.plot(sol["time"], sol["var_x"], label=r"$\langle x^2 \rangle(t)$")
-    ax1.plot(sol["time"], sol["var_p"], label=r"$\langle p^2 \rangle(t)$")
-    ax1.axhline(thermal_variance, color='black', linestyle='--', alpha=0.7, label=rf"Thermal Asymptote ($T={temp}$)")
+    # Variance Plot (ax1) - Now showing the smoothed, rotated variances
+    ax1.plot(sol["time"], sol["var_x"], label=r"$\langle \tilde{x}^2 \rangle(t)$ (Rotated)")
+    ax1.plot(sol["time"], sol["var_p"], label=r"$\langle \tilde{p}^2 \rangle(t)$ (Rotated)")
     
     ax1.set_ylabel("Variance")
     ax1.legend()
     ax1.grid(True)
-    ax1.set_title(rf"Homodyne detection $T={temp}$")
+    ax1.set_title(rf"Heterodyne detection $T={temp}$ (Interaction Picture)")
     
-    # Fisher Information Plot (ax2)
+    # Fisher Information Plot (ax2) - Should no longer have extreme spikes
     ax2.plot(sol["time"], sol["FI"], color='red', label=r"Dynamical $\mathcal{F}_\sigma^G(t)$")
     #ax2.plot(sol["time"], sol["QFI"], color='black', label=r"$QFI$")
-    ax2.axhline(thermal_FI, color='black', linestyle='--', alpha=0.7, label=r"Thermal Asymptote $\mathcal{F}_{th}$")
     
     ax2.set_xlabel("t")
     ax2.set_ylabel(r"$\mathcal{F}_T$")
