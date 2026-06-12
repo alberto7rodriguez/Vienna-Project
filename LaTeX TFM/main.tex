@@ -1,0 +1,131 @@
+\documentclass[a4paper,12pt]{article}
+
+\input{tools/packages.tex}
+\input{tools/styles.tex}
+\input{tools/acro.tex}
+
+\begin{document}
+
+%%% COVER %%%
+\fancypagestyle{alim}{\fancyhf{}\renewcommand{\headrulewidth}{0pt}
+\cfoot{\includegraphics[height=2.2cm]{img/logos/logo_telecos.png}}
+}
+\thispagestyle{empty}
+\begin{center}
+{\sffamily 
+\resizebox{0.8\textwidth}{!}{\includegraphics{img/logos/upc_completo+telecos.png}}\\
+\vspace{1cm}
+{\Huge Thesis title}\\
+\vspace{0.5cm}
+{\color{black}\hrule height 1pt}
+\vspace{1cm}
+{\large{Master Thesis\\
+submitted to the Faculty of the \\
+Escola T\`ecnica d'Enginyeria de Telecomunicaci\'o de Barcelona \\
+Universitat Polit\`ecnica de Catalunya \\
+by\\
+\vspace{0.4cm}
+Student Name}}
+
+\nocite{*} % only if you no use \cite{}
+
+\vspace{1.5cm}
+
+{In partial fulfillment\\
+of the requirements for the master in\\
+\textit{(Write the name of your Master)} \textbf{ENGINEERING}}
+
+\vspace{2cm}
+
+{{Advisor: name of the advisor}} \\
+{{Barcelona, Date XXXXX}}
+\thispagestyle{alim}
+}
+
+%%% INDEX %%%
+\end{center}
+\newpage
+\tableofcontents
+
+%%% LISTS %%%
+\newpage
+\listoffigures
+\lstlistoflistings
+\listoftables
+
+%%% REVISION %%%
+\newpage
+\input{revision_history}
+
+%%% ABSTRACT %%%
+\clearpage
+\newpage
+\section*{Abstract}
+
+{Every copy of the thesis must have an abstract. An abstract must provide a concise summary of the thesis. In style, the
+abstract should be a miniature version of the thesis: short introduction, a summary of the results, conclusions or main
+arguments presented in the thesis. The abstract may not exceed 150 words for a Degree’s thesis.}
+
+\input{introduction}
+
+%%% StateOfTheArt %%%
+\clearpage\section{State of the art of the technology used or applied in this thesis:}
+
+{A background, comprehensive review of the literature is required. This is known as the Review of Literature and should
+include relevant, recent research that has been done on the subject matter.}
+
+\subsection{Topic}
+
+Here you have a couple of references about LaTeX ~\cite{latexcompanion} and electrodynamics \cite{einstein}.
+
+\bigskip
+
+\subsection{Topic}
+
+%%% METHODOLOGY %%%
+\clearpage\section{Methodology / project development: }
+
+{The Methodology is included in this chapter and should include all relevant methods that were utilized as well as
+research methods and measurements, software and hardware development, ...}
+
+\input{result}
+
+%%% BDGET %%%
+\clearpage
+
+\section{Budget}
+{\selectlanguage{english}
+\foreignlanguage{english}{Depending on the thesis scope this document should include:}}
+
+%%% ENVIRONMENT %%%
+\clearpage
+
+\section[Environment Impact (Optional)]{{Environment Impact (Optional)}}
+
+{Whether the tasks that have led to the realization of this thesis, as if its results have identifiable environmental
+impact, describe it in this section.}
+
+%%% CONCLUSION AND FUTURE %%%
+\clearpage
+\section{Conclusions and future development: }
+
+{This should include your summary, conclusions and recommendations. }
+
+%%% BIBLIOGRAPHY %%%
+\newpage
+
+\medskip
+\bibliographystyle{unsrt}
+\bibliography{bibliography.bib}
+
+%%% ANNEX %%%
+\clearpage
+\newpage
+
+\begin{appendices}
+
+{Appendices may be included in your thesis but it is not a requirement.}
+
+\end{appendices}
+
+\end{document}
